@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.packages/
+.venv/
+.pytest_cache/
+.ruff_cache/
+media/
+private_uploads/
+staticfiles/
+.git/

@@ -1,0 +1,77 @@
+name: Deploy OVH VPS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r backend/requirements.txt
+      - run: pytest -q
+        working-directory: backend
+        env:
+          SQLITE_FOR_TESTS: "1"
+      - run: ruff check .
+        working-directory: backend
+      - run: python manage.py check && python manage.py makemigrations --check --dry-run
+        working-directory: backend
+        env:
+          SQLITE_FOR_TESTS: "1"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci && npm run lint && npm run build
+        working-directory: frontend
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate deployment secrets
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+          OVH_KNOWN_HOSTS: ${{ secrets.OVH_KNOWN_HOSTS }}
+          OVH_APP_PATH: ${{ vars.OVH_APP_PATH }}
+        run: |
+          test -n "$OVH_HOST"
+          test -n "$OVH_USER"
+          test -n "$OVH_SSH_KEY"
+          test -n "$OVH_KNOWN_HOSTS"
+          test -n "$OVH_APP_PATH"
+      - name: Configure SSH
+        env:
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+          OVH_KNOWN_HOSTS: ${{ secrets.OVH_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d "$HOME/.ssh"
+          printf '%s\n' "$OVH_SSH_KEY" > "$HOME/.ssh/ovh_deploy"
+          chmod 600 "$HOME/.ssh/ovh_deploy"
+          printf '%s\n' "$OVH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+      - name: Backup, update and restart production stack
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+          OVH_APP_PATH: ${{ vars.OVH_APP_PATH }}
+        run: |
+          ssh -i "$HOME/.ssh/ovh_deploy" -o BatchMode=yes "$OVH_USER@$OVH_HOST" "bash -s -- '$OVH_APP_PATH'" <<'REMOTE'
+          set -euo pipefail
+          cd "$1"
+          bash scripts/backup.sh
+          git pull --ff-only origin main
+          docker compose --env-file .env.prod -f docker-compose.prod.yml up -d --build --remove-orphans
+          docker image prune -f
+          REMOTE
